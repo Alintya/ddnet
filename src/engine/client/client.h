@@ -49,7 +49,7 @@ public:
 };
 
 
-class CClient : public IClient, public CDemoPlayer::IListner
+class CClient : public IClient, public CDemoPlayer::IListener
 {
 	// needed interfaces
 	IEngine *m_pEngine;
@@ -95,7 +95,6 @@ class CClient : public IClient, public CDemoPlayer::IListner
 	int m_RenderFrames;
 
 	NETADDR m_ServerAddress;
-	int m_WindowMustRefocus;
 	int m_SnapCrcErrors;
 	bool m_AutoScreenshotRecycle;
 	bool m_AutoStatScreenshotRecycle;
@@ -117,9 +116,12 @@ class CClient : public IClient, public CDemoPlayer::IListner
 
 	//
 	char m_aCurrentMap[256];
+	char m_aCurrentMapPath[CEditor::MAX_PATH_LENGTH];
 	unsigned m_CurrentMapCrc;
 
-	bool m_TimeoutCodeSent[2];
+	char m_aTimeoutCodes[2][32];
+	bool m_aTimeoutCodeSent[2];
+	bool m_GenerateTimeoutSeed;
 
 	//
 	char m_aCmdConnect[256];
@@ -161,8 +163,8 @@ class CClient : public IClient, public CDemoPlayer::IListner
 	class CSnapshotStorage m_SnapshotStorage[2];
 	CSnapshotStorage::CHolder *m_aSnapshots[2][NUM_SNAPSHOT_TYPES];
 
-	int m_RecivedSnapshots[2];
-	char m_aSnapshotIncommingData[CSnapshot::MAX_SIZE];
+	int m_ReceivedSnapshots[2];
+	char m_aSnapshotIncomingData[CSnapshot::MAX_SIZE];
 
 	class CSnapshotStorage::CHolder m_aDemorecSnapshotHolders[NUM_SNAPSHOT_TYPES];
 	char *m_aDemorecSnapshotData[NUM_SNAPSHOT_TYPES][2][CSnapshot::MAX_SIZE];
@@ -194,6 +196,10 @@ class CClient : public IClient, public CDemoPlayer::IListner
 
 	char m_aDDNetSrvListToken[4];
 	bool m_DDNetSrvListTokenSet;
+
+#if defined(CONF_FAMILY_UNIX)
+	CFifo m_Fifo;
+#endif
 
 public:
 	IEngine *Engine() { return m_pEngine; }
@@ -267,6 +273,7 @@ public:
 
 	// ---
 
+	int GetPredictionTime();
 	void *SnapGetItem(int SnapID, int Index, CSnapItem *pItem);
 	void SnapInvalidateItem(int SnapID, int Index);
 	void *SnapFindItem(int SnapID, int Type, int ID);
@@ -320,6 +327,7 @@ public:
 
 	static void Con_Quit(IConsole::IResult *pResult, void *pUserData);
 	static void Con_DemoPlay(IConsole::IResult *pResult, void *pUserData);
+	static void Con_DemoSpeed(IConsole::IResult *pResult, void *pUserData);
 	static void Con_Minimize(IConsole::IResult *pResult, void *pUserData);
 	static void Con_Ping(IConsole::IResult *pResult, void *pUserData);
 	static void Con_Screenshot(IConsole::IResult *pResult, void *pUserData);
@@ -332,6 +340,11 @@ public:
 	static void Con_StopRecord(IConsole::IResult *pResult, void *pUserData);
 	static void Con_AddDemoMarker(IConsole::IResult *pResult, void *pUserData);
 	static void ConchainServerBrowserUpdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+	static void ConchainFullscreen(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+	static void ConchainWindowBordered(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+	static void ConchainWindowScreen(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+	static void ConchainWindowVSync(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+	static void ConchainTimeoutSeed(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 
 	static void Con_DemoSlice(IConsole::IResult *pResult, void *pUserData);
 	static void Con_DemoSliceBegin(IConsole::IResult *pResult, void *pUserData);
@@ -353,17 +366,27 @@ public:
 
 	void ServerBrowserUpdate();
 
+	// gfx
+	void SwitchWindowScreen(int Index);
+	void ToggleFullscreen();
+	void ToggleWindowBordered();
+	void ToggleWindowVSync();
+
 	// DDRace
+
+	void GenerateTimeoutSeed();
+	void GenerateTimeoutCodes();
 
 	virtual const char* GetCurrentMap();
 	virtual int GetCurrentMapCrc();
+	virtual const char* GetCurrentMapPath();
 	virtual const char* RaceRecordStart(const char *pFilename);
 	virtual void RaceRecordStop();
 	virtual bool RaceRecordIsRecording();
 
 	virtual void DemoSliceBegin();
 	virtual void DemoSliceEnd();
-	virtual void DemoSlice(const char *pDstPath);
+	virtual void DemoSlice(const char *pDstPath, bool RemoveChat);
 
 	void RequestDDNetSrvList();
 	bool EditorHasUnsavedData() { return m_pEditor->HasUnsavedData(); }

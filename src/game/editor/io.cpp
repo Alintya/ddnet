@@ -578,10 +578,27 @@ int CEditorMap::Save(class IStorage *pStorage, const char *pFileName)
 	return 1;
 }
 
+void CEditor::LoadCurrentMap()
+{
+	Load(m_pClient->GetCurrentMapPath(), IStorage::TYPE_ALL);
+	m_ValidSaveFilename = true;
+}
+
 int CEditor::Load(const char *pFileName, int StorageType)
 {
 	Reset();
-	return m_Map.Load(Kernel()->RequestInterface<IStorage>(), pFileName, StorageType);
+	int result = m_Map.Load(Kernel()->RequestInterface<IStorage>(), pFileName, StorageType);
+	if (result)
+	{
+		str_copy(m_aFileName, pFileName, 512);
+		SortImages();
+	}
+	else
+	{
+		m_aFileName[0] = 0;
+		Reset();
+	}
+	return result;
 }
 
 int CEditorMap::Load(class IStorage *pStorage, const char *pFileName, int StorageType)
@@ -877,50 +894,6 @@ int CEditorMap::Load(class IStorage *pStorage, const char *pFileName, int Storag
 						if(pTilemapItem->m_Version >= 3)
 							IntsToStr(pTilemapItem->m_aName, sizeof(pTiles->m_aName)/sizeof(int), pTiles->m_aName);
 
-						if (Size >= pTiles->m_Width*pTiles->m_Height*sizeof(CTile))
-						{
-							mem_copy(pTiles->m_pTiles, pData, pTiles->m_Width*pTiles->m_Height*sizeof(CTile));
-
-							if(pTiles->m_Game && pTilemapItem->m_Version == MakeVersion(1, *pTilemapItem))
-							{
-								for(int i = 0; i < pTiles->m_Width*pTiles->m_Height; i++)
-								{
-									if(pTiles->m_pTiles[i].m_Index)
-										pTiles->m_pTiles[i].m_Index += ENTITY_OFFSET;
-								}
-							}
-
-							// Convert race stoppers to ddrace stoppers
-							/*if(pTiles->m_Game)
-							{
-								for(int i = 0; i < pTiles->m_Width*pTiles->m_Height; i++)
-								{
-									if(pTiles->m_pTiles[i].m_Index == 29)
-									{
-										pTiles->m_pTiles[i].m_Index = 60;
-										pTiles->m_pTiles[i].m_Flags = TILEFLAG_HFLIP|TILEFLAG_VFLIP|TILEFLAG_ROTATE;
-									}
-									else if(pTiles->m_pTiles[i].m_Index == 30)
-									{
-										pTiles->m_pTiles[i].m_Index = 60;
-										pTiles->m_pTiles[i].m_Flags = TILEFLAG_ROTATE;
-									}
-									else if(pTiles->m_pTiles[i].m_Index == 31)
-									{
-										pTiles->m_pTiles[i].m_Index = 60;
-										pTiles->m_pTiles[i].m_Flags = TILEFLAG_HFLIP|TILEFLAG_VFLIP;
-									}
-									else if(pTiles->m_pTiles[i].m_Index == 32)
-									{
-										pTiles->m_pTiles[i].m_Index = 60;
-										pTiles->m_pTiles[i].m_Flags = 0;
-									}
-								}
-							}*/
-						}
-
-						DataFile.UnloadData(pTilemapItem->m_Data);
-
 						if(pTiles->m_Tele)
 						{
 							void *pTeleData = DataFile.GetData(pTilemapItem->m_Tele);
@@ -1083,6 +1056,77 @@ int CEditorMap::Load(class IStorage *pStorage, const char *pFileName, int Storag
 							}
 							DataFile.UnloadData(pTilemapItem->m_Tune);
 						}
+						else // regular tile layer or game layer
+						{
+							if (Size >= pTiles->m_Width*pTiles->m_Height*sizeof(CTile))
+							{
+								mem_copy(pTiles->m_pTiles, pData, pTiles->m_Width*pTiles->m_Height*sizeof(CTile));
+
+								if(pTiles->m_Game && pTilemapItem->m_Version == MakeVersion(1, *pTilemapItem))
+								{
+									for(int i = 0; i < pTiles->m_Width*pTiles->m_Height; i++)
+									{
+										if(pTiles->m_pTiles[i].m_Index)
+											pTiles->m_pTiles[i].m_Index += ENTITY_OFFSET;
+									}
+								}
+							}
+						}
+
+						DataFile.UnloadData(pTilemapItem->m_Data);
+
+						// Remove unused tiles on game and front layers
+						/*if(pTiles->m_Game)
+						{
+							for(int i = 0; i < pTiles->m_Width*pTiles->m_Height; i++)
+							{
+								if(!IsValidGameTile(pTiles->m_pTiles[i].m_Index))
+								{
+									pTiles->m_pTiles[i].m_Index = 0;
+									pTiles->m_pTiles[i].m_Flags = 0;
+								}
+							}
+						}
+						if(pTiles->m_Front)
+						{
+							for(int i = 0; i < pTiles->m_Width*pTiles->m_Height; i++)
+							{
+								if(!IsValidFrontTile(pTiles->m_pTiles[i].m_Index))
+								{
+									pTiles->m_pTiles[i].m_Index = 0;
+									pTiles->m_pTiles[i].m_Flags = 0;
+								}
+							}
+						}*/
+
+						// Convert race stoppers to ddrace stoppers
+						/*if(pTiles->m_Game)
+						{
+							for(int i = 0; i < pTiles->m_Width*pTiles->m_Height; i++)
+							{
+								if(pTiles->m_pTiles[i].m_Index == 29)
+								{
+									pTiles->m_pTiles[i].m_Index = 60;
+									pTiles->m_pTiles[i].m_Flags = TILEFLAG_HFLIP|TILEFLAG_VFLIP|TILEFLAG_ROTATE;
+								}
+								else if(pTiles->m_pTiles[i].m_Index == 30)
+								{
+									pTiles->m_pTiles[i].m_Index = 60;
+									pTiles->m_pTiles[i].m_Flags = TILEFLAG_ROTATE;
+								}
+								else if(pTiles->m_pTiles[i].m_Index == 31)
+								{
+									pTiles->m_pTiles[i].m_Index = 60;
+									pTiles->m_pTiles[i].m_Flags = TILEFLAG_HFLIP|TILEFLAG_VFLIP;
+								}
+								else if(pTiles->m_pTiles[i].m_Index == 32)
+								{
+									pTiles->m_pTiles[i].m_Index = 60;
+									pTiles->m_pTiles[i].m_Flags = 0;
+								}
+							}
+						}*/
+
 					}
 					else if(pLayerItem->m_Type == LAYERTYPE_QUADS)
 					{

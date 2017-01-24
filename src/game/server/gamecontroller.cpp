@@ -422,7 +422,7 @@ void IGameController::ChangeMap(const char *pToMap)
 {
 	/*str_copy(m_aMapWish, pToMap, sizeof(m_aMapWish));
 	EndRound();*/
-	str_copy(g_Config.m_SvMap, pToMap, sizeof(m_aMapWish));
+	str_copy(g_Config.m_SvMap, pToMap, sizeof(g_Config.m_SvMap));
 }
 
 /*void IGameController::CycleMap()
@@ -560,8 +560,8 @@ void IGameController::OnCharacterSpawn(class CCharacter *pChr)
 	pChr->IncreaseHealth(10);
 
 	// give default weapons
-	pChr->GiveWeapon(WEAPON_HAMMER, -1);
-	pChr->GiveWeapon(WEAPON_GUN, -1);
+	pChr->GiveWeapon(WEAPON_HAMMER);
+	pChr->GiveWeapon(WEAPON_GUN);
 }
 
 void IGameController::DoWarmup(int Seconds)

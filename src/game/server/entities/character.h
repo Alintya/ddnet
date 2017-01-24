@@ -26,6 +26,7 @@ enum
 	FAKETUNE_NOCOLL = 8,
 	FAKETUNE_NOHOOK = 16,
 	FAKETUNE_JETPACK = 32,
+	FAKETUNE_NOHAMMER = 64,
 };
 
 class CCharacter : public CEntity
@@ -74,8 +75,9 @@ public:
 	bool IncreaseHealth(int Amount);
 	bool IncreaseArmor(int Amount);
 
-	bool GiveWeapon(int Weapon, int Ammo);
+	void GiveWeapon(int Weapon, bool Remove = false);
 	void GiveNinja();
+	void RemoveNinja();
 
 	void SetEmote(int Emote, int Tick);
 
@@ -129,6 +131,7 @@ private:
 	// input
 	CNetObj_PlayerInput m_PrevInput;
 	CNetObj_PlayerInput m_Input;
+	CNetObj_PlayerInput m_SavedInput;
 	int m_NumInputs;
 	int m_Jumped;
 

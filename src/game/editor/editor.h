@@ -61,7 +61,7 @@ public:
 		m_aName[0] = 0;
 		m_Bottom = 0;
 		m_Top = 0;
-		m_Synchronized = true;
+		m_Synchronized = false;
 	}
 
 	void Resort()
@@ -507,6 +507,9 @@ public:
 	CLayerTiles(int w, int h);
 	~CLayerTiles();
 
+	virtual CTile GetTile(int x, int y);
+	virtual void SetTile(int x, int y, CTile tile);
+
 	virtual void Resize(int NewW, int NewH);
 	virtual void Shift(int Direction);
 
@@ -589,6 +592,9 @@ class CLayerGame : public CLayerTiles
 public:
 	CLayerGame(int w, int h);
 	~CLayerGame();
+
+	virtual CTile GetTile(int x, int y);
+	virtual void SetTile(int x, int y, CTile tile);
 
 	virtual int RenderProperties(CUIRect *pToolbox);
 };
@@ -714,6 +720,9 @@ public:
 		m_SpeedupForce = 50;
 		m_SpeedupMaxSpeed = 0;
 		m_SpeedupAngle = 0;
+		m_LargeLayerWasWarned = false;
+		m_PreventUnusedTilesWasWarned = false;
+		m_AllowPlaceUnusedTiles = false;
 	}
 
 	virtual void Init();
@@ -744,7 +753,8 @@ public:
 	void Reset(bool CreateDefault=true);
 	int Save(const char *pFilename);
 	int Load(const char *pFilename, int StorageType);
-	int Append(const char *pFilename, int StorageType);
+	int Append(const char *pFilename, int StorageType); 
+	void LoadCurrentMap();
 	void Render();
 
 	CQuad *GetSelectedQuad();
@@ -771,13 +781,19 @@ public:
 	{
 		POPEVENT_EXIT=0,
 		POPEVENT_LOAD,
+		POPEVENT_LOADCURRENT,
 		POPEVENT_NEW,
 		POPEVENT_SAVE,
+		POPEVENT_LARGELAYER,
+		POPEVENT_PREVENTUNUSEDTILES
 	};
 
 	int m_PopupEventType;
 	int m_PopupEventActivated;
 	int m_PopupEventWasActivated;
+	bool m_LargeLayerWasWarned;
+	bool m_PreventUnusedTilesWasWarned;
+	bool m_AllowPlaceUnusedTiles;
 
 	enum
 	{
@@ -796,6 +812,7 @@ public:
 	char m_aFileDialogFileName[MAX_PATH_LENGTH];
 	char m_aFileDialogCurrentFolder[MAX_PATH_LENGTH];
 	char m_aFileDialogCurrentLink[MAX_PATH_LENGTH];
+	char m_aFileDialogSearchText[64];
 	char *m_pFileDialogPath;
 	bool m_aFileDialogActivate;
 	int m_FileDialogFileType;
@@ -817,7 +834,7 @@ public:
 
 		bool operator<(const CFilelistItem &Other) { return !str_comp(m_aFilename, "..") ? true : !str_comp(Other.m_aFilename, "..") ? false :
 														m_IsDir && !Other.m_IsDir ? true : !m_IsDir && Other.m_IsDir ? false :
-														str_comp_filenames(m_aFilename, Other.m_aFilename) < 0; }
+														str_comp_nocase(m_aFilename, Other.m_aFilename) < 0; }
 	};
 	sorted_array<CFilelistItem> m_FileList;
 	int m_FilesStartAt;
@@ -911,7 +928,7 @@ public:
 	void UiInvokePopupMenu(void *pID, int Flags, float X, float Y, float W, float H, int (*pfnFunc)(CEditor *pEditor, CUIRect Rect), void *pExtra=0);
 	void UiDoPopupMenu();
 
-	int UiDoValueSelector(void *pID, CUIRect *pRect, const char *pLabel, int Current, int Min, int Max, int Step, float Scale, const char *pToolTip, bool isDegree=false, bool isHex=false);
+	int UiDoValueSelector(void *pID, CUIRect *pRect, const char *pLabel, int Current, int Min, int Max, int Step, float Scale, const char *pToolTip, bool isDegree=false, bool isHex=false, int corners=CUI::CORNER_ALL, vec4* color=0);
 
 	static int PopupGroup(CEditor *pEditor, CUIRect View);
 	static int PopupLayer(CEditor *pEditor, CUIRect View);
@@ -1077,6 +1094,7 @@ public:
 
 	virtual void Resize(int NewW, int NewH);
 	virtual void Shift(int Direction);
+	virtual void SetTile(int x, int y, CTile tile);
 	virtual void BrushDraw(CLayer *pBrush, float wx, float wy);
 };
 

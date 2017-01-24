@@ -167,7 +167,7 @@ void mem_zero(void *block, unsigned size);
 	Returns:
 		<0 - Block a is lesser then block b
 		0 - Block a is equal to block b
-		>0 - Block a is greater then block b
+		>0 - Block a is greater than block b
 */
 int mem_comp(const void *a, const void *b, int size);
 
@@ -184,6 +184,7 @@ enum {
 	IOFLAG_READ = 1,
 	IOFLAG_WRITE = 2,
 	IOFLAG_RANDOM = 4,
+	IOFLAG_APPEND = 8,
 
 	IOSEEK_START = 0,
 	IOSEEK_CUR = 1,
@@ -198,7 +199,7 @@ typedef struct IOINTERNAL *IOHANDLE;
 
 	Parameters:
 		filename - File to open.
-		flags - A set of flags. IOFLAG_READ, IOFLAG_WRITE, IOFLAG_RANDOM.
+		flags - A set of flags. IOFLAG_READ, IOFLAG_WRITE, IOFLAG_RANDOM, IOFLAG_APPEND.
 
 	Returns:
 		Returns a handle to the file on success and 0 on failure.
@@ -1066,6 +1067,18 @@ int fs_listdir_info(const char *dir, FS_LISTDIR_INFO_CALLBACK cb, int type, void
 int fs_makedir(const char *path);
 
 /*
+	Function: fs_makedir_rec_for
+		Recursively create directories for a file
+
+	Parameters:
+		path - File for which to create directories
+
+	Returns:
+		Returns 0 on success. Negative value on failure.
+*/
+int fs_makedir_rec_for(const char *path);
+
+/*
 	Function: fs_storage_path
 		Fetches per user configuration directory.
 
@@ -1252,7 +1265,19 @@ unsigned str_quickhash(const char *str);
 */
 void gui_messagebox(const char *title, const char *message);
 
-int str_utf8_comp_names(const char *a, const char *b);
+/*
+	Function: str_utf8_comp_confusable
+		Compares two strings for visual appearance.
+
+	Parameters:
+		a - String to compare.
+		b - String to compare.
+
+	Returns:
+		0 if the strings are confusable.
+		!=0 otherwise.
+*/
+int str_utf8_comp_confusable(const char *a, const char *b);
 
 int str_utf8_isspace(int code);
 
@@ -1363,6 +1388,20 @@ void shell_execute(const char *file);
 int os_compare_version(int major, int minor);
 
 /*
+	Function: generate_password
+		Generates a null-terminated password of length `2 *
+		random_length`.
+
+
+	Parameters:
+		buffer - Pointer to the start of the output buffer.
+		length - Length of the buffer.
+		random - Pointer to a randomly-initialized array of shorts.
+		random_length - Length of the short array.
+*/
+void generate_password(char *buffer, unsigned length, unsigned short *random, unsigned random_length);
+
+/*
 	Function: secure_random_init
 		Initializes the secure random module.
 		You *MUST* check the return value of this function.
@@ -1374,6 +1413,21 @@ int os_compare_version(int major, int minor);
 int secure_random_init();
 
 /*
+	Function: secure_random_password
+		Fills the buffer with the specified amount of random password
+		characters.
+
+		The desired password length must be greater or equal to 6, even
+		and smaller or equal to 128.
+
+	Parameters:
+		buffer - Pointer to the start of the buffer.
+		length - Length of the buffer.
+		pw_length - Length of the desired password.
+*/
+void secure_random_password(char *buffer, unsigned length, unsigned pw_length);
+
+/*
 	Function: secure_random_fill
 		Fills the buffer with the specified amount of random bytes.
 
@@ -1381,7 +1435,13 @@ int secure_random_init();
 		buffer - Pointer to the start of the buffer.
 		length - Length of the buffer.
 */
-void secure_random_fill(void *bytes, size_t length);
+void secure_random_fill(void *bytes, unsigned length);
+
+/*
+	Function: secure_rand
+		Returns random int (replacement for rand()).
+*/
+int secure_rand();
 
 #ifdef __cplusplus
 }

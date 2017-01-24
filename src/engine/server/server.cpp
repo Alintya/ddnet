@@ -23,7 +23,7 @@
 #include <engine/shared/packer.h>
 #include <engine/shared/protocol.h>
 #include <engine/shared/snapshot.h>
-#include <engine/shared/fifoconsole.h>
+#include <engine/shared/fifo.h>
 
 #include <mastersrv/mastersrv.h>
 
@@ -176,7 +176,7 @@ void CServerBan::InitServerBan(IConsole *pConsole, IStorage *pStorage, CServer* 
 	m_pServer = pServer;
 
 	// overwrites base command, todo: improve this
-	Console()->Register("ban", "s?ir", CFGFLAG_SERVER|CFGFLAG_STORE, ConBanExt, this, "Ban player with ip/client id for x minutes for any reason");
+	Console()->Register("ban", "s[ip|id] ?i[minutes] r[reason]", CFGFLAG_SERVER|CFGFLAG_STORE, ConBanExt, this, "Ban player with ip/client id for x minutes for any reason");
 }
 
 template<class T>
@@ -290,6 +290,7 @@ void CServer::CClient::Reset()
 	m_LastInputTick = -1;
 	m_SnapRate = CClient::SNAPRATE_INIT;
 	m_Score = 0;
+	m_NextMapChunk = 0;
 }
 
 CServer::CServer()
@@ -317,6 +318,21 @@ CServer::CServer()
 	m_RconRestrict = -1;
 	m_GeneratedRconPassword = 0;
 
+	m_ServerInfoFirstRequest = 0;
+	m_ServerInfoNumRequests = 0;
+	m_ServerInfoHighLoad = false;
+
+#if defined (CONF_SQL)
+	for (int i = 0; i < MAX_SQLSERVERS; i++)
+	{
+		m_apSqlReadServers[i] = 0;
+		m_apSqlWriteServers[i] = 0;
+	}
+
+	CSqlConnector::SetReadServers(m_apSqlReadServers);
+	CSqlConnector::SetWriteServers(m_apSqlWriteServers);
+#endif
+
 	Init();
 }
 
@@ -333,13 +349,20 @@ int CServer::TrySetClientName(int ClientID, const char *pName)
 	if(!aTrimmedName[0])
 		return -1;
 
-	// make sure that two clients doesn't have the same name
+	// check for names starting with /, as they can be abused to make people
+	// write chat commands
+	if(aTrimmedName[0] == '/')
+		return -1;
+
+	// make sure that two clients don't have the same name
 	for(int i = 0; i < MAX_CLIENTS; i++)
+	{
 		if(i != ClientID && m_aClients[i].m_State >= CClient::STATE_READY)
 		{
-			if(str_utf8_comp_names(pName, m_aClients[i].m_aName) == 0)
+			if(str_utf8_comp_confusable(aTrimmedName, m_aClients[i].m_aName) == 0)
 				return -1;
 		}
+	}
 
 	char aBuf[256];
 	str_format(aBuf, sizeof(aBuf), "'%s' -> '%s'", pName, aTrimmedName);
@@ -537,26 +560,7 @@ void CServer::InitRconPasswordIfEmpty()
 		return;
 	}
 
-	static const char VALUES[] = "ABCDEFGHKLMNPRSTUVWXYZabcdefghjkmnopqt23456789";
-	static const size_t NUM_VALUES = sizeof(VALUES) - 1; // Disregard the '\0'.
-	static const size_t PASSWORD_LENGTH = 6;
-	dbg_assert(NUM_VALUES * NUM_VALUES >= 2048, "need at least 2048 possibilities for 2-character sequences");
-	// With 6 characters, we get a password entropy of log(2048) * 6/2 = 33bit.
-
-	dbg_assert(PASSWORD_LENGTH % 2 == 0, "need an even password length");
-	unsigned short aRandom[PASSWORD_LENGTH / 2];
-	char aRandomPassword[PASSWORD_LENGTH+1];
-	aRandomPassword[PASSWORD_LENGTH] = 0;
-
-	secure_random_fill(aRandom, sizeof(aRandom));
-	for(size_t i = 0; i < PASSWORD_LENGTH / 2; i++)
-	{
-		unsigned short RandomNumber = aRandom[i] % 2048;
-		aRandomPassword[2 * i + 0] = VALUES[RandomNumber / NUM_VALUES];
-		aRandomPassword[2 * i + 1] = VALUES[RandomNumber % NUM_VALUES];
-	}
-
-	str_copy(g_Config.m_SvRconPassword, aRandomPassword, sizeof(g_Config.m_SvRconPassword));
+	secure_random_password(g_Config.m_SvRconPassword, sizeof(g_Config.m_SvRconPassword), 6);
 	m_GeneratedRconPassword = 1;
 }
 
@@ -778,6 +782,9 @@ int CServer::ClientRejoinCallback(int ClientID, void *pUser)
 int CServer::NewClientNoAuthCallback(int ClientID, bool Reset, void *pUser)
 {
 	CServer *pThis = (CServer *)pUser;
+
+	pThis->m_aClients[ClientID].m_DnsblState = CClient::DNSBL_STATE_NONE;
+
 	if (Reset)
 	{
 		pThis->m_aClients[ClientID].m_State = CClient::STATE_CONNECTING;
@@ -799,11 +806,11 @@ int CServer::NewClientCallback(int ClientID, void *pUser)
 {
 	CServer *pThis = (CServer *)pUser;
 	pThis->m_aClients[ClientID].m_State = CClient::STATE_AUTH;
+	pThis->m_aClients[ClientID].m_DnsblState = CClient::DNSBL_STATE_NONE;
 	pThis->m_aClients[ClientID].m_aName[0] = 0;
 	pThis->m_aClients[ClientID].m_aClan[0] = 0;
 	pThis->m_aClients[ClientID].m_Country = -1;
 	pThis->m_aClients[ClientID].m_Authed = AUTHED_NO;
-	pThis->m_aClients[ClientID].m_LastAuthed = AUTHED_NO;
 	pThis->m_aClients[ClientID].m_AuthTries = 0;
 	pThis->m_aClients[ClientID].m_pRconCmdToSend = 0;
 	pThis->m_aClients[ClientID].m_Traffic = 0;
@@ -811,6 +818,27 @@ int CServer::NewClientCallback(int ClientID, void *pUser)
 	memset(&pThis->m_aClients[ClientID].m_Addr, 0, sizeof(NETADDR));
 	pThis->m_aClients[ClientID].Reset();
 	return 0;
+}
+
+void CServer::InitDnsbl(int ClientID)
+{
+	NETADDR Addr = *m_NetServer.ClientAddr(ClientID);
+
+	//TODO: support ipv6
+	if (Addr.type != NETTYPE_IPV4)
+		return;
+
+	// build dnsbl host lookup
+	char aBuf[256];
+	if (g_Config.m_SvDnsblKey[0] == '\0')
+		// without key
+		str_format(aBuf, sizeof(aBuf), "%d.%d.%d.%d.%s", Addr.ip[3], Addr.ip[2], Addr.ip[1], Addr.ip[0], g_Config.m_SvDnsblHost);
+	else
+		// with key
+		str_format(aBuf, sizeof(aBuf), "%s.%d.%d.%d.%d.%s", g_Config.m_SvDnsblKey, Addr.ip[3], Addr.ip[2], Addr.ip[1], Addr.ip[0], g_Config.m_SvDnsblHost);
+
+	IEngine *pEngine = Kernel()->RequestInterface<IEngine>();
+	pEngine->HostLookup(&m_aClients[ClientID].m_DnsblLookup, aBuf, NETTYPE_IPV4);
 }
 
 int CServer::DelClientCallback(int ClientID, const char *pReason, void *pUser)
@@ -832,7 +860,6 @@ int CServer::DelClientCallback(int ClientID, const char *pReason, void *pUser)
 	pThis->m_aClients[ClientID].m_aClan[0] = 0;
 	pThis->m_aClients[ClientID].m_Country = -1;
 	pThis->m_aClients[ClientID].m_Authed = AUTHED_NO;
-	pThis->m_aClients[ClientID].m_LastAuthed = AUTHED_NO;
 	pThis->m_aClients[ClientID].m_AuthTries = 0;
 	pThis->m_aClients[ClientID].m_pRconCmdToSend = 0;
 	pThis->m_aClients[ClientID].m_Traffic = 0;
@@ -842,20 +869,47 @@ int CServer::DelClientCallback(int ClientID, const char *pReason, void *pUser)
 	return 0;
 }
 
-static int lastsent[MAX_CLIENTS];
-static int lastask[MAX_CLIENTS];
-static int lastasktick[MAX_CLIENTS];
-
 void CServer::SendMap(int ClientID)
 {
-	lastsent[ClientID] = 0;
-	lastask[ClientID] = 0;
-	lastasktick[ClientID] = Tick();
 	CMsgPacker Msg(NETMSG_MAP_CHANGE);
 	Msg.AddString(GetMapName(), 0);
 	Msg.AddInt(m_CurrentMapCrc);
 	Msg.AddInt(m_CurrentMapSize);
 	SendMsgEx(&Msg, MSGFLAG_VITAL|MSGFLAG_FLUSH, ClientID, true);
+
+	m_aClients[ClientID].m_NextMapChunk = 0;
+}
+
+void CServer::SendMapData(int ClientID, int Chunk)
+{
+	unsigned int ChunkSize = 1024-128;
+	unsigned int Offset = Chunk * ChunkSize;
+	int Last = 0;
+
+	// drop faulty map data requests
+	if(Chunk < 0 || Offset > m_CurrentMapSize)
+		return;
+
+	if(Offset+ChunkSize >= m_CurrentMapSize)
+	{
+		ChunkSize = m_CurrentMapSize-Offset;
+		Last = 1;
+	}
+
+	CMsgPacker Msg(NETMSG_MAP_DATA);
+	Msg.AddInt(Last);
+	Msg.AddInt(m_CurrentMapCrc);
+	Msg.AddInt(Chunk);
+	Msg.AddInt(ChunkSize);
+	Msg.AddRaw(&m_pCurrentMapData[Offset], ChunkSize);
+	SendMsgEx(&Msg, MSGFLAG_VITAL|MSGFLAG_FLUSH, ClientID, true);
+
+	if(g_Config.m_Debug)
+	{
+		char aBuf[256];
+		str_format(aBuf, sizeof(aBuf), "sending chunk %d with size %d", Chunk, ChunkSize);
+		Console()->Print(IConsole::OUTPUT_LEVEL_DEBUG, "server", aBuf);
+	}
 }
 
 void CServer::SendConnectionReady(int ClientID)
@@ -961,6 +1015,10 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && m_aClients[ClientID].m_State == CClient::STATE_AUTH)
 			{
 				const char *pVersion = Unpacker.GetString(CUnpacker::SANITIZE_CC);
+				if(!str_utf8_check(pVersion))
+				{
+					return;
+				}
 				if(str_comp(pVersion, GameServer()->NetVersion()) != 0)
 				{
 					// wrong version
@@ -971,6 +1029,10 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				}
 
 				const char *pPassword = Unpacker.GetString(CUnpacker::SANITIZE_CC);
+				if(!str_utf8_check(pPassword))
+				{
+					return;
+				}
 				if(g_Config.m_Password[0] != 0 && str_comp(g_Config.m_Password, pPassword) != 0)
 				{
 					// wrong password
@@ -995,44 +1057,21 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				return;
 
 			int Chunk = Unpacker.GetInt();
-			unsigned int ChunkSize = 1024-128;
-			unsigned int Offset = Chunk * ChunkSize;
-			int Last = 0;
-
-			lastask[ClientID] = Chunk;
-			lastasktick[ClientID] = Tick();
-			if (Chunk == 0)
+			if(Chunk != m_aClients[ClientID].m_NextMapChunk || !g_Config.m_SvFastDownload)
 			{
-				lastsent[ClientID] = 0;
-			}
-
-			// drop faulty map data requests
-			if(Chunk < 0 || Offset > m_CurrentMapSize)
+				SendMapData(ClientID, Chunk);
 				return;
-
-			if(Offset+ChunkSize >= m_CurrentMapSize)
-			{
-				ChunkSize = m_CurrentMapSize-Offset;
-				Last = 1;
 			}
 
-			if (lastsent[ClientID] < Chunk+g_Config.m_SvMapWindow && g_Config.m_SvFastDownload)
-				return;
-
-			CMsgPacker Msg(NETMSG_MAP_DATA);
-			Msg.AddInt(Last);
-			Msg.AddInt(m_CurrentMapCrc);
-			Msg.AddInt(Chunk);
-			Msg.AddInt(ChunkSize);
-			Msg.AddRaw(&m_pCurrentMapData[Offset], ChunkSize);
-			SendMsgEx(&Msg, MSGFLAG_FLUSH, ClientID, true);
-
-			if(g_Config.m_Debug)
+			if(Chunk == 0)
 			{
-				char aBuf[256];
-				str_format(aBuf, sizeof(aBuf), "sending chunk %d with size %d", Chunk, ChunkSize);
-				Console()->Print(IConsole::OUTPUT_LEVEL_DEBUG, "server", aBuf);
+				for(int i = 0; i < g_Config.m_SvMapWindow; i++)
+				{
+					SendMapData(ClientID, i);
+				}
 			}
+			SendMapData(ClientID, g_Config.m_SvMapWindow + m_aClients[ClientID].m_NextMapChunk);
+			m_aClients[ClientID].m_NextMapChunk++;
 		}
 		else if(Msg == NETMSG_READY)
 		{
@@ -1042,7 +1081,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				net_addr_str(m_NetServer.ClientAddr(ClientID), aAddrStr, sizeof(aAddrStr), true);
 
 				char aBuf[256];
-				str_format(aBuf, sizeof(aBuf), "player is ready. ClientID=%x addr=%s secure=%s", ClientID, aAddrStr, m_NetServer.HasSecurityToken(ClientID)?"yes":"no");
+				str_format(aBuf, sizeof(aBuf), "player is ready. ClientID=%d addr=%s secure=%s", ClientID, aAddrStr, m_NetServer.HasSecurityToken(ClientID)?"yes":"no");
 				Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "server", aBuf);
 				m_aClients[ClientID].m_State = CClient::STATE_READY;
 				GameServer()->OnClientConnected(ClientID);
@@ -1058,7 +1097,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				net_addr_str(m_NetServer.ClientAddr(ClientID), aAddrStr, sizeof(aAddrStr), true);
 
 				char aBuf[256];
-				str_format(aBuf, sizeof(aBuf), "player has entered the game. ClientID=%x addr=%s", ClientID, aAddrStr);
+				str_format(aBuf, sizeof(aBuf), "player has entered the game. ClientID=%d addr=%s", ClientID, aAddrStr);
 				Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
 				m_aClients[ClientID].m_State = CClient::STATE_INGAME;
 				GameServer()->OnClientEnter(ClientID);
@@ -1119,6 +1158,10 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 		else if(Msg == NETMSG_RCON_CMD)
 		{
 			const char *pCmd = Unpacker.GetString();
+			if(!str_utf8_check(pCmd))
+			{
+				return;
+			}
 			if(Unpacker.Error() == 0 && !str_comp(pCmd, "crashmeplx"))
 			{
 				CGameContext *GameServer = (CGameContext *) m_pGameServer;
@@ -1128,7 +1171,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && Unpacker.Error() == 0 && m_aClients[ClientID].m_Authed)
 			{
 				CGameContext *GameServer = (CGameContext *) m_pGameServer;
-				if (GameServer->m_apPlayers[ClientID] && (GameServer->m_apPlayers[ClientID]->m_ClientVersion < VERSION_DDNET_RCONPROTECT || m_aClients[ClientID].m_LastAuthed))
+				if (GameServer->m_apPlayers[ClientID])
 				{
 					char aBuf[256];
 					str_format(aBuf, sizeof(aBuf), "ClientID=%d rcon='%s'", ClientID, pCmd);
@@ -1140,7 +1183,6 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 					Console()->SetAccessLevel(IConsole::ACCESS_LEVEL_ADMIN);
 					m_RconClientID = IServer::RCON_CID_SERV;
 					m_RconAuthLevel = AUTHED_ADMIN;
-					m_aClients[ClientID].m_LastAuthed = AUTHED_NO;
 				}
 			}
 		}
@@ -1149,6 +1191,10 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 			const char *pPw;
 			Unpacker.GetString(); // login name, not used
 			pPw = Unpacker.GetString(CUnpacker::SANITIZE_CC);
+			if(!str_utf8_check(pPw))
+			{
+				return;
+			}
 
 			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && Unpacker.Error() == 0)
 			{
@@ -1167,7 +1213,6 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 
 				if(AuthLevel != -1)
 				{
-					m_aClients[ClientID].m_LastAuthed = AuthLevel;
 					if(m_aClients[ClientID].m_Authed != AuthLevel)
 					{
 						CMsgPacker Msg(NETMSG_RCON_AUTH_STATUS);
@@ -1264,11 +1309,34 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 	}
 }
 
-void CServer::SendServerInfo(const NETADDR *pAddr, int Token, bool Extended, int Offset)
+void CServer::SendServerInfoConnless(const NETADDR *pAddr, int Token, bool Extended)
+{
+	const int MaxRequests = g_Config.m_SvServerInfoPerSecond;
+	int64 Now = Tick();
+	if(Now <= m_ServerInfoFirstRequest + TickSpeed())
+	{
+		m_ServerInfoNumRequests++;
+	}
+	else
+	{
+		m_ServerInfoHighLoad = m_ServerInfoNumRequests > MaxRequests;
+		m_ServerInfoNumRequests = 1;
+		m_ServerInfoFirstRequest = Now;
+	}
+
+	bool Short = m_ServerInfoNumRequests > MaxRequests || m_ServerInfoHighLoad;
+	SendServerInfo(pAddr, Token, Extended, 0, Short);
+}
+
+void CServer::SendServerInfo(const NETADDR *pAddr, int Token, bool Extended, int Offset, bool Short)
 {
 	CNetChunk Packet;
 	CPacker p;
 	char aBuf[128];
+
+	Packet.m_ClientID = -1;
+	Packet.m_Address = *pAddr;
+	Packet.m_Flags = NETSENDFLAG_CONNLESS;
 
 	// count the players
 	int PlayerCount = 0, ClientCount = 0;
@@ -1344,6 +1412,14 @@ void CServer::SendServerInfo(const NETADDR *pAddr, int Token, bool Extended, int
 	if (Extended)
 		p.AddInt(Offset);
 
+	if(Short)
+	{
+		Packet.m_DataSize = p.Size();
+		Packet.m_pData = p.Data();
+		m_NetServer.Send(&Packet);
+		return;
+	}
+
 	int ClientsPerPacket = Extended ? 24 : VANILLA_MAX_CLIENTS;
 	int Skip = Offset;
 	int Take = ClientsPerPacket;
@@ -1366,9 +1442,6 @@ void CServer::SendServerInfo(const NETADDR *pAddr, int Token, bool Extended, int
 		}
 	}
 
-	Packet.m_ClientID = -1;
-	Packet.m_Address = *pAddr;
-	Packet.m_Flags = NETSENDFLAG_CONNLESS;
 	Packet.m_DataSize = p.Size();
 	Packet.m_pData = p.Data();
 	m_NetServer.Send(&Packet);
@@ -1404,68 +1477,37 @@ void CServer::PumpNetwork()
 			// stateless
 			if(!m_Register.RegisterProcessPacket(&Packet))
 			{
+				bool ServerInfo = false;
+				bool Extended = false;
+
 				if(Packet.m_DataSize == sizeof(SERVERBROWSE_GETINFO)+1 &&
 					mem_comp(Packet.m_pData, SERVERBROWSE_GETINFO, sizeof(SERVERBROWSE_GETINFO)) == 0)
 				{
-					SendServerInfo(&Packet.m_Address, ((unsigned char *)Packet.m_pData)[sizeof(SERVERBROWSE_GETINFO)]);
+					ServerInfo = true;
+					Extended = false;
 				}
 				else if(Packet.m_DataSize == sizeof(SERVERBROWSE_GETINFO64)+1 &&
 					mem_comp(Packet.m_pData, SERVERBROWSE_GETINFO64, sizeof(SERVERBROWSE_GETINFO64)) == 0)
 				{
-					SendServerInfo(&Packet.m_Address, ((unsigned char *)Packet.m_pData)[sizeof(SERVERBROWSE_GETINFO64)], true);
+					ServerInfo = true;
+					Extended = true;
+				}
+				if(ServerInfo)
+				{
+					int Token = ((unsigned char *)Packet.m_pData)[sizeof(SERVERBROWSE_GETINFO)];
+					SendServerInfoConnless(&Packet.m_Address, Token, Extended);
 				}
 			}
 		}
 		else
 			ProcessClientPacket(&Packet);
 	}
-	if(g_Config.m_SvFastDownload)
-	{
-		for (int i=0;i<MAX_CLIENTS;i++)
-		{
-			if (m_aClients[i].m_State != CClient::STATE_CONNECTING)
-				continue;
-			if (lastasktick[i] < Tick()-TickSpeed())
-			{
-				lastsent[i] = lastask[i];
-				lastasktick[i] = Tick();
-			}
-			if (lastask[i]<lastsent[i]-g_Config.m_SvMapWindow)
-				continue;
-
-			int Chunk = lastsent[i]++;
-			unsigned int ChunkSize = 1024-128;
-			unsigned int Offset = Chunk * ChunkSize;
-			int Last = 0;
-
-			// drop faulty map data requests
-			if(Chunk < 0 || Offset > m_CurrentMapSize)
-				continue;
-			if(Offset+ChunkSize >= m_CurrentMapSize)
-			{
-				ChunkSize = m_CurrentMapSize-Offset;
-				Last = 1;
-			}
-
-			CMsgPacker Msg(NETMSG_MAP_DATA);
-			Msg.AddInt(Last);
-			Msg.AddInt(m_CurrentMapCrc);
-			Msg.AddInt(Chunk);
-			Msg.AddInt(ChunkSize);
-			Msg.AddRaw(&m_pCurrentMapData[Offset], ChunkSize);
-			SendMsgEx(&Msg, MSGFLAG_FLUSH, i, true);
-
-			if(g_Config.m_Debug)
-			{
-				char aBuf[256];
-				str_format(aBuf, sizeof(aBuf), "sending chunk %d with size %d", Chunk, ChunkSize);
-				Console()->Print(IConsole::OUTPUT_LEVEL_DEBUG, "server", aBuf);
-			}
-		}
-	}
 
 	m_ServerBan.Update();
 	m_Econ.Update();
+#if defined(CONF_FAMILY_UNIX)
+	m_Fifo.Update();
+#endif
 }
 
 char *CServer::GetMapName()
@@ -1586,6 +1628,10 @@ int CServer::Run()
 
 	m_Econ.Init(Console(), &m_ServerBan);
 
+#if defined(CONF_FAMILY_UNIX)
+	m_Fifo.Init(Console(), g_Config.m_SvInputFifo, CFGFLAG_SERVER);
+#endif
+
 	char aBuf[256];
 	str_format(aBuf, sizeof(aBuf), "server name is '%s'", g_Config.m_SvName);
 	Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
@@ -1650,6 +1696,7 @@ int CServer::Run()
 
 					m_GameStartTime = time_get();
 					m_CurrentGameTick = 0;
+					m_ServerInfoFirstRequest = 0;
 					Kernel()->ReregisterInterface(GameServer());
 					GameServer()->OnInit();
 					UpdateServerInfo();
@@ -1659,6 +1706,50 @@ int CServer::Run()
 					str_format(aBuf, sizeof(aBuf), "failed to load map. mapname='%s'", g_Config.m_SvMap);
 					Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
 					str_copy(g_Config.m_SvMap, m_aCurrentMap, sizeof(g_Config.m_SvMap));
+				}
+			}
+
+			// handle dnsbl
+			if (g_Config.m_SvDnsbl)
+			{
+				for (int c = 0; c < MAX_CLIENTS; c++)
+				{
+					if (m_aClients[c].m_State == CClient::STATE_EMPTY)
+						continue;
+
+					if (m_aClients[c].m_DnsblState == CClient::DNSBL_STATE_NONE)
+					{
+						// initiate dnsbl lookup
+						m_aClients[c].m_DnsblState = CClient::DNSBL_STATE_PENDING;
+						InitDnsbl(c);
+					}
+					else if (m_aClients[c].m_DnsblState == CClient::DNSBL_STATE_PENDING &&
+								m_aClients[c].m_DnsblLookup.m_Job.Status() == CJob::STATE_DONE)
+					{
+
+						if (m_aClients[c].m_DnsblLookup.m_Addr.type == NETTYPE_INVALID)
+						{
+							// entry not found -> whitelisted
+							m_aClients[c].m_DnsblState = CClient::DNSBL_STATE_WHITELISTED;
+						}
+						else
+						{
+							// entry found -> blacklisted
+							m_aClients[c].m_DnsblState = CClient::DNSBL_STATE_BLACKLISTED;
+
+							// console output
+							char aAddrStr[NETADDR_MAXSTRSIZE];
+							net_addr_str(m_NetServer.ClientAddr(c), aAddrStr, sizeof(aAddrStr), true);
+
+							char aBuf[256];
+							str_format(aBuf, sizeof(aBuf), "ClientID=%d addr=%s secure=%s blacklisted", c, aAddrStr, m_NetServer.HasSecurityToken(c)?"yes":"no");
+							Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "dnsbl", aBuf);
+						}
+					}
+
+					if (m_aClients[c].m_DnsblState == CClient::DNSBL_STATE_BLACKLISTED &&
+							g_Config.m_SvDnsblBan)
+						m_NetServer.NetBan()->BanAddr(m_NetServer.ClientAddr(c), 60*10, "Blacklisted by DNSBL");
 				}
 			}
 
@@ -1745,15 +1836,31 @@ int CServer::Run()
 	{
 		if(m_aClients[i].m_State != CClient::STATE_EMPTY)
 			m_NetServer.Drop(i, "Server shutdown");
-
-		m_Econ.Shutdown();
 	}
 
-	GameServer()->OnShutdown();
+	m_Econ.Shutdown();
+
+#if defined(CONF_FAMILY_UNIX)
+	m_Fifo.Shutdown();
+#endif
+
+	GameServer()->OnShutdown(true);
 	m_pMap->Unload();
 
 	if(m_pCurrentMapData)
 		mem_free(m_pCurrentMapData);
+
+#if defined (CONF_SQL)
+		for (int i = 0; i < MAX_SQLSERVERS; i++)
+		{
+			if (m_apSqlReadServers[i])
+				delete m_apSqlReadServers[i];
+
+			if (m_apSqlWriteServers[i])
+				delete m_apSqlWriteServers[i];
+		}
+#endif
+
 	return 0;
 }
 
@@ -1792,6 +1899,34 @@ void CServer::ConStatus(IConsole::IResult *pResult, void *pUser)
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
 		if(pThis->m_aClients[i].m_State != CClient::STATE_EMPTY)
+		{
+			net_addr_str(pThis->m_NetServer.ClientAddr(i), aAddrStr, sizeof(aAddrStr), true);
+			if(pThis->m_aClients[i].m_State == CClient::STATE_INGAME)
+			{
+				const char *pAuthStr = pThis->m_aClients[i].m_Authed == CServer::AUTHED_ADMIN ? "(Admin)" :
+										pThis->m_aClients[i].m_Authed == CServer::AUTHED_MOD ? "(Mod)" :
+										pThis->m_aClients[i].m_Authed == CServer::AUTHED_HELPER ? "(Helper)" : "";
+				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s name='%s' score=%d client=%d secure=%s %s", i, aAddrStr,
+					pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, ((CGameContext *)(pThis->GameServer()))->m_apPlayers[i]->m_ClientVersion, pThis->m_NetServer.HasSecurityToken(i) ? "yes":"no", pAuthStr);
+			}
+			else
+				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s connecting", i, aAddrStr);
+			pThis->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "Server", aBuf);
+		}
+	}
+}
+
+void CServer::ConDnsblStatus(IConsole::IResult *pResult, void *pUser)
+{
+	// dump blacklisted clients
+	char aBuf[1024];
+	char aAddrStr[NETADDR_MAXSTRSIZE];
+	CServer* pThis = static_cast<CServer *>(pUser);
+
+	for(int i = 0; i < MAX_CLIENTS; i++)
+	{
+		if(pThis->m_aClients[i].m_State != CClient::STATE_EMPTY &&
+				pThis->m_aClients[i].m_DnsblState == CClient::DNSBL_STATE_BLACKLISTED)
 		{
 			net_addr_str(pThis->m_NetServer.ClientAddr(i), aAddrStr, sizeof(aAddrStr), true);
 			if(pThis->m_aClients[i].m_State == CClient::STATE_INGAME)
@@ -1919,7 +2054,6 @@ void CServer::ConLogout(IConsole::IResult *pResult, void *pUser)
 		pServer->SendMsgEx(&Msg, MSGFLAG_VITAL, pServer->m_RconClientID, true);
 
 		pServer->m_aClients[pServer->m_RconClientID].m_Authed = AUTHED_NO;
-		pServer->m_aClients[pServer->m_RconClientID].m_LastAuthed = AUTHED_NO;
 		pServer->m_aClients[pServer->m_RconClientID].m_AuthTries = 0;
 		pServer->m_aClients[pServer->m_RconClientID].m_pRconCmdToSend = 0;
 		pServer->SendRconLine(pServer->m_RconClientID, "Logout successful.");
@@ -1928,6 +2062,87 @@ void CServer::ConLogout(IConsole::IResult *pResult, void *pUser)
 		pServer->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
 	}
 }
+
+#if defined (CONF_SQL)
+
+void CServer::ConAddSqlServer(IConsole::IResult *pResult, void *pUserData)
+{
+	CServer *pSelf = (CServer *)pUserData;
+
+	if (pResult->NumArguments() != 7 && pResult->NumArguments() != 8)
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", "7 or 8 arguments are required");
+		return;
+	}
+
+	bool ReadOnly;
+	if (str_comp_nocase(pResult->GetString(0), "w") == 0)
+		ReadOnly = false;
+	else if (str_comp_nocase(pResult->GetString(0), "r") == 0)
+		ReadOnly = true;
+	else
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", "choose either 'r' for SqlReadServer or 'w' for SqlWriteServer");
+		return;
+	}
+
+	bool SetUpDb = pResult->NumArguments() == 8 ? pResult->GetInteger(7) : false;
+
+	CSqlServer** apSqlServers = ReadOnly ? pSelf->m_apSqlReadServers : pSelf->m_apSqlWriteServers;
+
+	for (int i = 0; i < MAX_SQLSERVERS; i++)
+	{
+		if (!apSqlServers[i])
+		{
+			apSqlServers[i] = new CSqlServer(pResult->GetString(1), pResult->GetString(2), pResult->GetString(3), pResult->GetString(4), pResult->GetString(5), pResult->GetInteger(6), ReadOnly, SetUpDb);
+
+			if(SetUpDb)
+			{
+				void *TablesThread = thread_init(CreateTablesThread, apSqlServers[i]);
+				thread_detach(TablesThread);
+			}
+
+			char aBuf[512];
+			str_format(aBuf, sizeof(aBuf), "Added new Sql%sServer: %d: DB: '%s' Prefix: '%s' User: '%s' IP: '%s' Port: %d", ReadOnly ? "Read" : "Write", i, apSqlServers[i]->GetDatabase(), apSqlServers[i]->GetPrefix(), apSqlServers[i]->GetUser(), apSqlServers[i]->GetIP(), apSqlServers[i]->GetPort());
+			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
+			return;
+		}
+	}
+	pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", "failed to add new sqlserver: limit of sqlservers reached");
+}
+
+void CServer::ConDumpSqlServers(IConsole::IResult *pResult, void *pUserData)
+{
+	CServer *pSelf = (CServer *)pUserData;
+
+	bool ReadOnly;
+	if (str_comp_nocase(pResult->GetString(0), "w") == 0)
+		ReadOnly = false;
+	else if (str_comp_nocase(pResult->GetString(0), "r") == 0)
+		ReadOnly = true;
+	else
+	{
+		pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", "choose either 'r' for SqlReadServer or 'w' for SqlWriteServer");
+		return;
+	}
+
+	CSqlServer** apSqlServers = ReadOnly ? pSelf->m_apSqlReadServers : pSelf->m_apSqlWriteServers;
+
+	for (int i = 0; i < MAX_SQLSERVERS; i++)
+		if (apSqlServers[i])
+		{
+			char aBuf[512];
+			str_format(aBuf, sizeof(aBuf), "SQL-%s %d: DB: '%s' Prefix: '%s' User: '%s' Pass: '%s' IP: '%s' Port: %d", ReadOnly ? "Read" : "Write", i, apSqlServers[i]->GetDatabase(), apSqlServers[i]->GetPrefix(), apSqlServers[i]->GetUser(), apSqlServers[i]->GetPass(), apSqlServers[i]->GetIP(), apSqlServers[i]->GetPort());
+			pSelf->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
+		}
+}
+
+void CServer::CreateTablesThread(void *pData)
+{
+	((CSqlServer *)pData)->CreateTables();
+}
+
+#endif
 
 void CServer::ConchainSpecialInfoupdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData)
 {
@@ -1998,7 +2213,6 @@ void CServer::LogoutByAuthLevel(int AuthLevel) // AUTHED_<x>
 			SendMsgEx(&Msg, MSGFLAG_VITAL, i, true);
 
 			m_aClients[i].m_Authed = AUTHED_NO;
-			m_aClients[i].m_LastAuthed = AUTHED_NO;
 			m_aClients[i].m_AuthTries = 0;
 			m_aClients[i].m_pRconCmdToSend = 0;
 
@@ -2048,15 +2262,24 @@ void CServer::RegisterCommands()
 	m_pStorage = Kernel()->RequestInterface<IStorage>();
 
 	// register console commands
-	Console()->Register("kick", "i?r", CFGFLAG_SERVER, ConKick, this, "Kick player with specified id for any reason");
+	Console()->Register("kick", "i[id] ?r[reason]", CFGFLAG_SERVER, ConKick, this, "Kick player with specified id for any reason");
 	Console()->Register("status", "", CFGFLAG_SERVER, ConStatus, this, "List players");
 	Console()->Register("shutdown", "", CFGFLAG_SERVER, ConShutdown, this, "Shut down");
 	Console()->Register("logout", "", CFGFLAG_SERVER, ConLogout, this, "Logout of rcon");
 
-	Console()->Register("record", "?s", CFGFLAG_SERVER|CFGFLAG_STORE, ConRecord, this, "Record to a file");
+	Console()->Register("record", "?s[file]", CFGFLAG_SERVER|CFGFLAG_STORE, ConRecord, this, "Record to a file");
 	Console()->Register("stoprecord", "", CFGFLAG_SERVER, ConStopRecord, this, "Stop recording");
 
 	Console()->Register("reload", "", CFGFLAG_SERVER, ConMapReload, this, "Reload the map");
+
+#if defined (CONF_SQL)
+
+	Console()->Register("add_sqlserver", "s['r'|'w'] s[Database] s[Prefix] s[User] s[Password] s[IP] i[Port] ?i[SetUpDatabase ?]", CFGFLAG_SERVER, ConAddSqlServer, this, "add a sqlserver");
+	Console()->Register("dump_sqlservers", "s['r'|'w']", CFGFLAG_SERVER, ConDumpSqlServers, this, "dumps all sqlservers readservers = r, writeservers = w");
+
+#endif
+
+	Console()->Register("dnsbl_status", "", CFGFLAG_SERVER, ConDnsblStatus, this, "List blacklisted players");
 
 	Console()->Chain("sv_name", ConchainSpecialInfoupdate, this);
 	Console()->Chain("password", ConchainSpecialInfoupdate, this);
@@ -2181,14 +2404,7 @@ int main(int argc, const char **argv) // ignore_convention
 	pConsole->Register("sv_test_cmds", "", CFGFLAG_SERVER, CServer::ConTestingCommands, pConsole, "Turns testing commands aka cheats on/off");
 	pConsole->Register("sv_rescue", "", CFGFLAG_SERVER, CServer::ConRescue, pConsole, "Allow /rescue command so players can teleport themselves out of freeze");
 
-	// restore empty config strings to their defaults
-	pConfig->RestoreStrings();
-
 	pEngine->InitLogfile();
-
-#if defined(CONF_FAMILY_UNIX)
-	FifoConsole *fifoConsole = new FifoConsole(pConsole, g_Config.m_SvInputFifo, CFGFLAG_SERVER);
-#endif
 	pServer->InitRconPasswordIfEmpty();
 
 	// run the server
@@ -2196,9 +2412,6 @@ int main(int argc, const char **argv) // ignore_convention
 	pServer->Run();
 
 	// free
-#if defined(CONF_FAMILY_UNIX)
-	delete fifoConsole;
-#endif
 	delete pServer;
 	delete pKernel;
 	delete pEngineMap;

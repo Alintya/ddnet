@@ -8,7 +8,6 @@
 #include <time.h>
 
 #include "system.h"
-#include "confusables.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -41,6 +40,7 @@
 		#define _task_user_
 
 		#include <Carbon/Carbon.h>
+		#include <mach/mach_time.h>
 	#endif
 
 	#if defined(__ANDROID__)
@@ -413,7 +413,7 @@ int mem_check_imp()
 		MEMTAIL *tail = (MEMTAIL *)(((char*)(header+1))+header->size);
 		if(tail->guard != MEM_GUARD_VAL)
 		{
-			dbg_msg("mem", "Memory check failed at %s(%d): %d", header->filename, header->line, header->size);
+			dbg_msg("mem", "memory check failed at %s(%d): %d", header->filename, header->line, header->size);
 			return 0;
 		}
 		header = header->next;
@@ -428,6 +428,8 @@ IOHANDLE io_open(const char *filename, int flags)
 		return (IOHANDLE)fopen(filename, "rb");
 	if(flags == IOFLAG_WRITE)
 		return (IOHANDLE)fopen(filename, "wb");
+	if(flags == IOFLAG_APPEND)
+		return (IOHANDLE)fopen(filename, "ab");
 	return 0x0;
 }
 
@@ -668,15 +670,27 @@ void set_new_tick()
 int64 time_get()
 {
 	static int64 last = 0;
-	if(!new_tick)
+	if(new_tick == 0)
 		return last;
 	if(new_tick != -1)
 		new_tick = 0;
 
-#if defined(CONF_FAMILY_UNIX)
-	struct timeval val;
-	gettimeofday(&val, NULL);
-	last = (int64)val.tv_sec*(int64)1000000+(int64)val.tv_usec;
+#if defined(CONF_PLATFORM_MACOSX)
+	static int got_timebase = 0;
+	mach_timebase_info_data_t timebase;
+	if(!got_timebase)
+	{
+		mach_timebase_info(&timebase);
+	}
+	uint64_t time = mach_absolute_time();
+	uint64_t q = time / timebase.denom;
+	uint64_t r = time % timebase.denom;
+	last = q * timebase.numer + r * timebase.numer / timebase.denom;
+	return last;
+#elif defined(CONF_FAMILY_UNIX)
+	struct timespec spec;
+	clock_gettime(CLOCK_MONOTONIC, &spec);
+	last = (int64)spec.tv_sec*(int64)1000000+(int64)spec.tv_nsec/1000;
 	return last;
 #elif defined(CONF_FAMILY_WINDOWS)
 	{
@@ -694,7 +708,9 @@ int64 time_get()
 
 int64 time_freq()
 {
-#if defined(CONF_FAMILY_UNIX)
+#if defined(CONF_PLATFORM_MACOSX)
+	return 1000000000;
+#elif defined(CONF_FAMILY_UNIX)
 	return 1000000;
 #elif defined(CONF_FAMILY_WINDOWS)
 	int64 t;
@@ -1702,6 +1718,24 @@ int fs_storage_path(const char *appname, char *path, int max)
 #endif
 }
 
+int fs_makedir_rec_for(const char *path)
+{
+	char buffer[1024*2];
+	char *p;
+	str_copy(buffer, path, sizeof(buffer));
+	for(p = buffer+1; *p != '\0'; p++)
+	{
+		if(*p == '/' && *(p + 1) != '\0')
+		{
+			*p = '\0';
+			if(fs_makedir(buffer) < 0)
+				return -1;
+			*p = '/';
+		}
+	}
+	return 0;
+}
+
 int fs_makedir(const char *path)
 {
 #if defined(CONF_FAMILY_WINDOWS)
@@ -2199,36 +2233,6 @@ int str_toint_base(const char *str, int base) { return strtol(str, NULL, base); 
 float str_tofloat(const char *str) { return atof(str); }
 
 
-int str_utf8_comp_names(const char *a, const char *b)
-{
-	int codeA;
-	int codeB;
-	int diff;
-
-	while(*a && *b)
-	{
-		do
-		{
-			codeA = str_utf8_decode(&a);
-		}
-		while(*a && !str_utf8_isspace(codeA));
-
-		do
-		{
-			codeB = str_utf8_decode(&b);
-		}
-		while(*b && !str_utf8_isspace(codeB));
-
-		diff = codeA - codeB;
-
-		if((diff < 0 && !str_utf8_is_confusable(codeA, codeB))
-		|| (diff > 0 && !str_utf8_is_confusable(codeB, codeA)))
-			return diff;
-	}
-
-	return *a - *b;
-}
-
 int str_utf8_isspace(int code)
 {
 	return code > 0x20 && code != 0xA0 && code != 0x034F && code != 0x2800 &&
@@ -2417,18 +2421,13 @@ int str_utf8_decode(const char **ptr)
 
 int str_utf8_check(const char *str)
 {
-	while(*str)
+	int codepoint;
+	while((codepoint = str_utf8_decode(&str)))
 	{
-		if((*str&0x80) == 0x0)
-			str++;
-		else if((*str&0xE0) == 0xC0 && (*(str+1)&0xC0) == 0x80)
-			str += 2;
-		else if((*str&0xF0) == 0xE0 && (*(str+1)&0xC0) == 0x80 && (*(str+2)&0xC0) == 0x80)
-			str += 3;
-		else if((*str&0xF8) == 0xF0 && (*(str+1)&0xC0) == 0x80 && (*(str+2)&0xC0) == 0x80 && (*(str+3)&0xC0) == 0x80)
-			str += 4;
-		else
+		if(codepoint == -1)
+		{
 			return 0;
+		}
 	}
 	return 1;
 }
@@ -2525,7 +2524,43 @@ int secure_random_init()
 #endif
 }
 
-void secure_random_fill(void *bytes, size_t length)
+void generate_password(char *buffer, unsigned length, unsigned short *random, unsigned random_length)
+{
+	static const char VALUES[] = "ABCDEFGHKLMNPRSTUVWXYZabcdefghjkmnopqt23456789";
+	static const size_t NUM_VALUES = sizeof(VALUES) - 1; // Disregard the '\0'.
+	unsigned i;
+	dbg_assert(length >= random_length * 2 + 1, "too small buffer");
+	dbg_assert(NUM_VALUES * NUM_VALUES >= 2048, "need at least 2048 possibilities for 2-character sequences");
+
+	buffer[random_length * 2] = 0;
+
+	for(i = 0; i < random_length; i++)
+	{
+		unsigned short random_number = random[i] % 2048;
+		buffer[2 * i + 0] = VALUES[random_number / NUM_VALUES];
+		buffer[2 * i + 1] = VALUES[random_number % NUM_VALUES];
+	}
+}
+
+#define MAX_PASSWORD_LENGTH 128
+
+void secure_random_password(char *buffer, unsigned length, unsigned pw_length)
+{
+	unsigned short random[MAX_PASSWORD_LENGTH / 2];
+	// With 6 characters, we get a password entropy of log(2048) * 6/2 = 33bit.
+	dbg_assert(length >= pw_length + 1, "too small buffer");
+	dbg_assert(pw_length >= 6, "too small password length");
+	dbg_assert(pw_length % 2 == 0, "need an even password length");
+	dbg_assert(pw_length <= MAX_PASSWORD_LENGTH, "too large password length");
+
+	secure_random_fill(random, pw_length);
+
+	generate_password(buffer, length, random, pw_length / 2);
+}
+
+#undef MAX_PASSWORD_LENGTH
+
+void secure_random_fill(void *bytes, unsigned length)
 {
 	if(!secure_random_data.initialized)
 	{
@@ -2545,6 +2580,13 @@ void secure_random_fill(void *bytes, size_t length)
 		dbg_break();
 	}
 #endif
+}
+
+int secure_rand()
+{
+	unsigned int i;
+	secure_random_fill(&i, sizeof(i));
+	return (int)(i%RAND_MAX);
 }
 
 #if defined(__cplusplus)

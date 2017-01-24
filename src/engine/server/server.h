@@ -3,6 +3,7 @@
 #ifndef ENGINE_SERVER_SERVER_H
 #define ENGINE_SERVER_SERVER_H
 
+#include <engine/engine.h>
 #include <engine/server.h>
 
 #include <engine/map.h>
@@ -15,7 +16,13 @@
 #include <base/math.h>
 #include <engine/shared/mapchecker.h>
 #include <engine/shared/econ.h>
+#include <engine/shared/fifo.h>
 #include <engine/shared/netban.h>
+
+#if defined (CONF_SQL)
+	#include "sql_connector.h"
+	#include "sql_server.h"
+#endif
 
 class CSnapIDPool
 {
@@ -75,6 +82,12 @@ class CServer : public IServer
 	class IGameServer *m_pGameServer;
 	class IConsole *m_pConsole;
 	class IStorage *m_pStorage;
+
+#if defined (CONF_SQL)
+	CSqlServer* m_apSqlReadServers[MAX_SQLSERVERS];
+	CSqlServer* m_apSqlWriteServers[MAX_SQLSERVERS];
+#endif
+
 public:
 	class IGameServer *GameServer() { return m_pGameServer; }
 	class IConsole *Console() { return m_pConsole; }
@@ -104,7 +117,12 @@ public:
 
 			SNAPRATE_INIT=0,
 			SNAPRATE_FULL,
-			SNAPRATE_RECOVER
+			SNAPRATE_RECOVER,
+
+			DNSBL_STATE_NONE=0,
+			DNSBL_STATE_PENDING,
+			DNSBL_STATE_BLACKLISTED,
+			DNSBL_STATE_WHITELISTED,
 		};
 
 		class CInput
@@ -135,8 +153,8 @@ public:
 		int m_Country;
 		int m_Score;
 		int m_Authed;
-		int m_LastAuthed;
 		int m_AuthTries;
+		int m_NextMapChunk;
 
 		const IConsole::CCommandInfo *m_pRconCmdToSend;
 
@@ -145,6 +163,10 @@ public:
 		// DDRace
 
 		NETADDR m_Addr;
+
+		// DNSBL
+		int m_DnsblState;
+		CHostLookup m_DnsblLookup;
 	};
 
 	CClient m_aClients[MAX_CLIENTS];
@@ -155,6 +177,9 @@ public:
 	CSnapIDPool m_IDPool;
 	CNetServer m_NetServer;
 	CEcon m_Econ;
+#if defined(CONF_FAMILY_UNIX)
+	CFifo m_Fifo;
+#endif
 	CServerBan m_ServerBan;
 
 	IEngineMap *m_pMap;
@@ -183,6 +208,10 @@ public:
 	CMapChecker m_MapChecker;
 
 	int m_RconRestrict;
+
+	bool m_ServerInfoHighLoad;
+	int64 m_ServerInfoFirstRequest;
+	int m_ServerInfoNumRequests;
 
 	CServer();
 
@@ -228,6 +257,7 @@ public:
 	static int ClientRejoinCallback(int ClientID, void *pUser);
 
 	void SendMap(int ClientID);
+	void SendMapData(int ClientID, int Chunk);
 	void SendConnectionReady(int ClientID);
 	void SendRconLine(int ClientID, const char *pLine);
 	static void SendRconLineAuthed(const char *pLine, void *pUser, bool Highlighted = false);
@@ -238,7 +268,8 @@ public:
 
 	void ProcessClientPacket(CNetChunk *pPacket);
 
-	void SendServerInfo(const NETADDR *pAddr, int Token, bool Extended=false, int Offset=0);
+	void SendServerInfoConnless(const NETADDR *pAddr, int Token, bool Extended);
+	void SendServerInfo(const NETADDR *pAddr, int Token, bool Extended=false, int Offset=0, bool Short=false);
 	void UpdateServerInfo();
 
 	void PumpNetwork();
@@ -263,6 +294,16 @@ public:
 	static void ConStopRecord(IConsole::IResult *pResult, void *pUser);
 	static void ConMapReload(IConsole::IResult *pResult, void *pUser);
 	static void ConLogout(IConsole::IResult *pResult, void *pUser);
+	static void ConDnsblStatus(IConsole::IResult *pResult, void *pUser);
+
+#if defined (CONF_SQL)
+	// console commands for sqlmasters
+	static void ConAddSqlServer(IConsole::IResult *pResult, void *pUserData);
+	static void ConDumpSqlServers(IConsole::IResult *pResult, void *pUserData);
+
+	static void CreateTablesThread(void *pData);
+#endif
+
 	static void ConchainSpecialInfoupdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainMaxclientsperipUpdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainCommandAccessUpdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
@@ -291,6 +332,13 @@ public:
 	void RestrictRconOutput(int ClientID) { m_RconRestrict = ClientID; }
 
 	virtual int* GetIdMap(int ClientID);
+
+	void InitDnsbl(int ClientID);
+	bool DnsblWhite(int ClientID)
+	{
+		return m_aClients[ClientID].m_DnsblState == CClient::DNSBL_STATE_NONE ||
+		m_aClients[ClientID].m_DnsblState == CClient::DNSBL_STATE_WHITELISTED;
+	}
 };
 
 #endif
