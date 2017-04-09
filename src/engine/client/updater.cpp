@@ -74,7 +74,7 @@ void CUpdater::FetchFile(const char *pFile, const char *pDestPath)
 	CFetchTask *Task = new CFetchTask(false);
 	m_pFetcher->QueueAdd(Task, aBuf, aPath, -2, this, &CUpdater::CompletionCallback, &CUpdater::ProgressCallback);
 }
- 
+
 void CUpdater::MoveFile(const char *pFile)
 {
 	char aBuf[256];
@@ -211,8 +211,10 @@ void CUpdater::PerformUpdate()
 
 	const char *aLastFile;
 	aLastFile = "";
-	for(map<string, bool>::reverse_iterator it = m_FileJobs.rbegin(); it != m_FileJobs.rend(); ++it){
-		if(it->second){
+	for(map<string, bool>::reverse_iterator it = m_FileJobs.rbegin(); it != m_FileJobs.rend(); ++it)
+	{
+		if(it->second)
+		{
 			aLastFile = it->first.c_str();
 			break;
 		}

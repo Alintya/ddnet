@@ -29,6 +29,7 @@ MACRO_CONFIG_INT(ClAutoScreenshotMax, cl_auto_screenshot_max, 10, 0, 1000, CFGFL
 MACRO_CONFIG_INT(ClResetWantedWeaponOnDeath, cl_reset_wanted_weapon_on_death, 1, 0, 1, CFGFLAG_CLIENT|CFGFLAG_SAVE, "Reset wanted weapon on death")
 MACRO_CONFIG_INT(ClShowBroadcasts, cl_show_broadcasts, 1, 0, 1, CFGFLAG_CLIENT, "Show broadcasts ingame")
 MACRO_CONFIG_INT(ClPrintBroadcasts, cl_print_broadcasts, 1, 0, 1, CFGFLAG_CLIENT|CFGFLAG_SAVE, "Print broadcasts to console")
+MACRO_CONFIG_INT(ClPrintMotd, cl_print_motd, 1, 0, 1, CFGFLAG_CLIENT|CFGFLAG_SAVE, "Print motd to console")
 MACRO_CONFIG_INT(ClFriendsIgnoreClan, cl_friends_ignore_clan, 0, 0, 1, CFGFLAG_CLIENT|CFGFLAG_SAVE, "Ignore clan tag when searching for friends")
 
 MACRO_CONFIG_INT(ClEventthread, cl_eventthread, 0, 0, 1, CFGFLAG_CLIENT, "Enables the usage of a thread to pump the events")
@@ -264,9 +265,18 @@ MACRO_CONFIG_INT(ClMessageSystemHue, cl_message_system_hue, 42, 0, 255, CFGFLAG_
 MACRO_CONFIG_INT(ClMessageSystemSat, cl_message_system_sat, 255, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "System message color saturation")
 MACRO_CONFIG_INT(ClMessageSystemLht, cl_message_system_lht, 192, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "System message color lightness")
 
+MACRO_CONFIG_INT(ClMessageClientHue, cl_message_client_hue, 147, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Client message color hue")
+MACRO_CONFIG_INT(ClMessageClientSat, cl_message_client_sat, 255, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Client message color saturation")
+MACRO_CONFIG_INT(ClMessageClientLht, cl_message_client_lht, 192, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Client message color lightness")
+
 MACRO_CONFIG_INT(ClMessageHighlightHue, cl_message_highlight_hue, 0, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Highlighted message color hue")
 MACRO_CONFIG_INT(ClMessageHighlightSat, cl_message_highlight_sat, 255, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Highlighted message color saturation")
 MACRO_CONFIG_INT(ClMessageHighlightLht, cl_message_highlight_lht, 192, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Highlighted message color lightness")
+
+MACRO_CONFIG_INT(ClMessageFriend, cl_message_friend, 1, 0, 1, CFGFLAG_SAVE|CFGFLAG_CLIENT, "Enable coloring and the heart for friends")
+MACRO_CONFIG_INT(ClMessageFriendHue, cl_message_friend_hue, 0, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Friend message color hue")
+MACRO_CONFIG_INT(ClMessageFriendSat, cl_message_friend_sat, 255, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Friend message color saturation")
+MACRO_CONFIG_INT(ClMessageFriendLht, cl_message_friend_lht, 145, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Friend message color lightness")
 
 MACRO_CONFIG_INT(ClMessageTeamHue, cl_message_team_hue, 85, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Team message color hue")
 MACRO_CONFIG_INT(ClMessageTeamSat, cl_message_team_sat, 255, 0, 255, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Team message color saturation")

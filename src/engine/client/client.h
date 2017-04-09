@@ -152,7 +152,7 @@ class CClient : public IClient, public CDemoPlayer::IListener
 	int m_CurrentInput[2];
 	bool m_LastDummy;
 	bool m_LastDummy2;
-	CNetObj_PlayerInput HammerInput;
+	bool m_DummySendConnInfo;
 
 	// graphs
 	CGraph m_InputtimeMarginGraph;
@@ -261,10 +261,8 @@ public:
 	virtual void DummyConnect();
 	virtual bool DummyConnected();
 	virtual bool DummyConnecting();
-	void DummyInfo();
 	int m_DummyConnected;
 	int m_LastDummyConnectTime;
-	int m_Fire;
 
 	virtual void GetServerInfo(CServerInfo *pServerInfo);
 	void ServerInfoRequest();
@@ -294,6 +292,7 @@ public:
 	static int PlayerScoreNameComp(const void *a, const void *b);
 
 	void ProcessConnlessPacket(CNetChunk *pPacket);
+	void ProcessServerInfo(int Type, NETADDR *pFrom, const void *pData, int DataSize);
 	void ProcessServerPacket(CNetChunk *pPacket);
 	void ProcessServerPacketDummy(CNetChunk *pPacket);
 
@@ -333,6 +332,7 @@ public:
 	static void Con_Screenshot(IConsole::IResult *pResult, void *pUserData);
 	static void Con_Rcon(IConsole::IResult *pResult, void *pUserData);
 	static void Con_RconAuth(IConsole::IResult *pResult, void *pUserData);
+	static void Con_RconLogin(IConsole::IResult *pResult, void *pUserData);
 	static void Con_AddFavorite(IConsole::IResult *pResult, void *pUserData);
 	static void Con_RemoveFavorite(IConsole::IResult *pResult, void *pUserData);
 	static void Con_Play(IConsole::IResult *pResult, void *pUserData);
@@ -386,7 +386,7 @@ public:
 
 	virtual void DemoSliceBegin();
 	virtual void DemoSliceEnd();
-	virtual void DemoSlice(const char *pDstPath, bool RemoveChat);
+	virtual void DemoSlice(const char *pDstPath, CLIENTFUNC_FILTER pfnFilter, void *pUser);
 
 	void RequestDDNetSrvList();
 	bool EditorHasUnsavedData() { return m_pEditor->HasUnsavedData(); }

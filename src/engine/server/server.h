@@ -19,6 +19,8 @@
 #include <engine/shared/fifo.h>
 #include <engine/shared/netban.h>
 
+#include "authmanager.h"
+
 #if defined (CONF_SQL)
 	#include "sql_connector.h"
 	#include "sql_server.h"
@@ -68,7 +70,7 @@ class CServerBan : public CNetBan
 public:
 	class CServer *Server() const { return m_pServer; }
 
-	void InitServerBan(class IConsole *pConsole, class IStorage *pStorage, class CServer* pServer);
+	void InitServerBan(class IConsole *pConsole, class IStorage *pStorage, class CServer *pServer);
 
 	virtual int BanAddr(const NETADDR *pAddr, int Seconds, const char *pReason);
 	virtual int BanRange(const CNetRange *pRange, int Seconds, const char *pReason);
@@ -84,8 +86,8 @@ class CServer : public IServer
 	class IStorage *m_pStorage;
 
 #if defined (CONF_SQL)
-	CSqlServer* m_apSqlReadServers[MAX_SQLSERVERS];
-	CSqlServer* m_apSqlWriteServers[MAX_SQLSERVERS];
+	CSqlServer *m_apSqlReadServers[MAX_SQLSERVERS];
+	CSqlServer *m_apSqlWriteServers[MAX_SQLSERVERS];
 #endif
 
 public:
@@ -153,6 +155,7 @@ public:
 		int m_Country;
 		int m_Score;
 		int m_Authed;
+		int m_AuthKey;
 		int m_AuthTries;
 		int m_NextMapChunk;
 
@@ -201,11 +204,10 @@ public:
 	unsigned char *m_pCurrentMapData;
 	unsigned int m_CurrentMapSize;
 
-	int m_GeneratedRconPassword;
-
 	CDemoRecorder m_aDemoRecorder[MAX_CLIENTS+1];
 	CRegister m_Register;
 	CMapChecker m_MapChecker;
+	CAuthManager m_AuthManager;
 
 	int m_RconRestrict;
 
@@ -232,8 +234,6 @@ public:
 	//int TickSpeed()
 
 	int Init();
-
-	void InitRconPasswordIfEmpty();
 
 	void SetRconCID(int ClientID);
 	bool IsAuthed(int ClientID);
@@ -268,8 +268,8 @@ public:
 
 	void ProcessClientPacket(CNetChunk *pPacket);
 
-	void SendServerInfoConnless(const NETADDR *pAddr, int Token, bool Extended);
-	void SendServerInfo(const NETADDR *pAddr, int Token, bool Extended=false, int Offset=0, bool Short=false);
+	void SendServerInfo(const NETADDR *pAddr, int Token, int Type, bool SendClients);
+	void SendServerInfoConnless(const NETADDR *pAddr, int Token, int Type);
 	void UpdateServerInfo();
 
 	void PumpNetwork();
@@ -296,6 +296,13 @@ public:
 	static void ConLogout(IConsole::IResult *pResult, void *pUser);
 	static void ConDnsblStatus(IConsole::IResult *pResult, void *pUser);
 
+	static void ConAuthAdd(IConsole::IResult *pResult, void *pUser);
+	static void ConAuthAddHashed(IConsole::IResult *pResult, void *pUser);
+	static void ConAuthUpdate(IConsole::IResult *pResult, void *pUser);
+	static void ConAuthUpdateHashed(IConsole::IResult *pResult, void *pUser);
+	static void ConAuthRemove(IConsole::IResult *pResult, void *pUser);
+	static void ConAuthList(IConsole::IResult *pResult, void *pUser);
+
 #if defined (CONF_SQL)
 	// console commands for sqlmasters
 	static void ConAddSqlServer(IConsole::IResult *pResult, void *pUserData);
@@ -309,8 +316,10 @@ public:
 	static void ConchainCommandAccessUpdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainConsoleOutputLevelUpdate(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 
-	void LogoutByAuthLevel(int AuthLevel);
+	void LogoutClient(int ClientID, const char *pReason);
+	void LogoutKey(int Key, const char *pReason);
 
+	void ConchainRconPasswordChangeGeneric(int Level, IConsole::IResult *pResult);
 	static void ConchainRconPasswordChange(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainRconModPasswordChange(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainRconHelperPasswordChange(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
@@ -339,6 +348,8 @@ public:
 		return m_aClients[ClientID].m_DnsblState == CClient::DNSBL_STATE_NONE ||
 		m_aClients[ClientID].m_DnsblState == CClient::DNSBL_STATE_WHITELISTED;
 	}
+
+	void AuthRemoveKey(int KeySlot);
 };
 
 #endif
