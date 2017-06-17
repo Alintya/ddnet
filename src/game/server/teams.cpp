@@ -234,6 +234,7 @@ void CGameTeams::ForceLeaveTeam(int ClientID)
 
 			// unlock team when last player leaves
 			SetTeamLock(m_Core.Team(ClientID), false);
+			ResetInvited(m_Core.Team(ClientID));
 		}
 	}
 
@@ -286,7 +287,7 @@ int64_t CGameTeams::TeamMask(int Team, int ExceptID, int Asker)
 		if (!GetPlayer(i))
 			continue; // Player doesn't exist
 
-		if (!(GetPlayer(i)->GetTeam() == -1 || GetPlayer(i)->m_Paused))
+		if (!(GetPlayer(i)->GetTeam() == -1 || GetPlayer(i)->IsPaused()))
 		{ // Not spectator
 			if (i != Asker)
 			{ // Actions of other players
@@ -628,16 +629,17 @@ void CGameTeams::OnCharacterDeath(int ClientID, int Weapon)
 			ChangeTeamState(Team, CGameTeams::TEAMSTATE_OPEN);
 
 			char aBuf[512];
-			str_format(aBuf, sizeof(aBuf), "Everyone in your locked team was killed because you %s.", Weapon == WEAPON_SELF ? "killed" : "died");
-			GameServer()->SendChatTarget(ClientID, aBuf);
 			str_format(aBuf, sizeof(aBuf), "Everyone in your locked team was killed because '%s' %s.", Server()->ClientName(ClientID), Weapon == WEAPON_SELF ? "killed" : "died");
 
 			for (int i = 0; i < MAX_CLIENTS; i++)
-				if(m_Core.Team(i) == Team && i != ClientID && GameServer()->m_apPlayers[i])
+				if(m_Core.Team(i) == Team && GameServer()->m_apPlayers[i])
 				{
-					GameServer()->m_apPlayers[i]->KillCharacter(WEAPON_SELF);
-					if (Weapon == WEAPON_SELF)
-						GameServer()->m_apPlayers[i]->Respawn(true); // spawn the rest of team with weak hook on the killer
+					if(i != ClientID)
+					{
+						GameServer()->m_apPlayers[i]->KillCharacter(WEAPON_SELF);
+						if (Weapon == WEAPON_SELF)
+							GameServer()->m_apPlayers[i]->Respawn(true); // spawn the rest of team with weak hook on the killer
+					}
 					GameServer()->SendChatTarget(i, aBuf);
 				}
 		}
@@ -647,19 +649,12 @@ void CGameTeams::OnCharacterDeath(int ClientID, int Weapon)
 void CGameTeams::SetTeamLock(int Team, bool Lock)
 {
 	if(Team > TEAM_FLOCK && Team < TEAM_SUPER)
-	{
-		if(!m_TeamLocked[Team] && Lock)
-			ResetInvited(Team);
 		m_TeamLocked[Team] = Lock;
-	}
 }
 
 void CGameTeams::ResetInvited(int Team)
 {
 	m_Invited[Team] = 0;
-	for (int i = 0; i < MAX_CLIENTS; i++)
-		if(m_Core.Team(i) == Team && GameServer()->m_apPlayers[i])
-			m_Invited[Team] |= 1ULL << i;
 }
 
 void CGameTeams::SetClientInvited(int Team, int ClientID, bool Invited)
@@ -696,4 +691,5 @@ void CGameTeams::KillSavedTeam(int Team)
 
 	// unlock team when last player leaves
 	SetTeamLock(Team, false);
+	ResetInvited(Team);
 }

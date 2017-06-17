@@ -299,7 +299,6 @@ private:
 	static void ConJoinTeam(IConsole::IResult *pResult, void *pUserData);
 	static void ConLockTeam(IConsole::IResult *pResult, void *pUserData);
 	static void ConInviteTeam(IConsole::IResult *pResult, void *pUserData);
-	static void ConUnInviteTeam(IConsole::IResult *pResult, void *pUserData);
 	static void ConMe(IConsole::IResult *pResult, void *pUserData);
 	static void ConWhisper(IConsole::IResult *pResult, void *pUserData);
 	static void ConConverse(IConsole::IResult *pResult, void *pUserData);
@@ -326,6 +325,7 @@ private:
 	static void ConMutes(IConsole::IResult *pResult, void *pUserData);
 
 	static void ConList(IConsole::IResult *pResult, void *pUserData);
+	static void ConSetDDRTeam(IConsole::IResult *pResult, void *pUserData);
 	static void ConFreezeHammer(IConsole::IResult *pResult, void *pUserData);
 	static void ConUnFreezeHammer(IConsole::IResult *pResult, void *pUserData);
 

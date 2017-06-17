@@ -25,6 +25,7 @@
 #include <engine/shared/network.h>
 #include <engine/shared/packer.h>
 #include <engine/shared/protocol.h>
+#include <engine/shared/protocol_ex.h>
 #include <engine/shared/snapshot.h>
 #include <engine/shared/fifo.h>
 
@@ -841,8 +842,9 @@ int CServer::DelClientCallback(int ClientID, const char *pReason, void *pUser)
 
 	char aAddrStr[NETADDR_MAXSTRSIZE];
 	net_addr_str(pThis->m_NetServer.ClientAddr(ClientID), aAddrStr, sizeof(aAddrStr), true);
+
 	char aBuf[256];
-	str_format(aBuf, sizeof(aBuf), "client dropped. cid=%d addr=%s reason='%s'", ClientID, aAddrStr,	pReason);
+	str_format(aBuf, sizeof(aBuf), "client dropped. cid=%d addr=%s reason='%s'", ClientID, aAddrStr, pReason);
 	pThis->Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "server", aBuf);
 
 	// notify the mod about the drop
@@ -974,14 +976,18 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 	int ClientID = pPacket->m_ClientID;
 	CUnpacker Unpacker;
 	Unpacker.Reset(pPacket->m_pData, pPacket->m_DataSize);
+	CMsgPacker Packer(NETMSG_EX);
 
 	// unpack msgid and system flag
-	int Msg = Unpacker.GetInt();
-	int Sys = Msg&1;
-	Msg >>= 1;
+	int Msg;
+	bool Sys;
+	CUuid Uuid;
 
-	if(Unpacker.Error())
+	int Result = UnpackMessageID(&Msg, &Sys, &Uuid, &Unpacker, &Packer);
+	if(Result == UNPACKMESSAGE_ERROR)
+	{
 		return;
+	}
 
 	if(g_Config.m_SvNetlimit && Msg != NETMSG_REQUEST_MAP_DATA)
 	{
@@ -1000,6 +1006,11 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 			m_aClients[ClientID].m_Traffic = (Alpha * ((float)pPacket->m_DataSize / Diff)) + (1.0 - Alpha) * m_aClients[ClientID].m_Traffic;
 			m_aClients[ClientID].m_TrafficSince = Now;
 		}
+	}
+
+	if(Result == UNPACKMESSAGE_ANSWER)
+	{
+		SendMsgEx(&Packer, MSGFLAG_VITAL, ClientID, true);
 	}
 
 	if(Sys)
@@ -1683,6 +1694,11 @@ int CServer::Run()
 {
 	m_AuthManager.Init();
 
+	if(g_Config.m_Debug)
+	{
+		g_UuidManager.DebugDump();
+	}
+
 	//
 	m_PrintCBIndex = Console()->RegisterPrintCallback(g_Config.m_ConsoleOutputLevel, SendRconLineAuthed, this);
 
@@ -1774,14 +1790,14 @@ int CServer::Run()
 					// new map loaded
 					GameServer()->OnShutdown();
 
-					for(int c = 0; c < MAX_CLIENTS; c++)
+					for(int ClientID = 0; ClientID < MAX_CLIENTS; ClientID++)
 					{
-						if(m_aClients[c].m_State <= CClient::STATE_AUTH)
+						if(m_aClients[ClientID].m_State <= CClient::STATE_AUTH)
 							continue;
 
-						SendMap(c);
-						m_aClients[c].Reset();
-						m_aClients[c].m_State = CClient::STATE_CONNECTING;
+						SendMap(ClientID);
+						m_aClients[ClientID].Reset();
+						m_aClients[ClientID].m_State = CClient::STATE_CONNECTING;
 					}
 
 					m_GameStartTime = time_get();
@@ -1802,44 +1818,46 @@ int CServer::Run()
 			// handle dnsbl
 			if (g_Config.m_SvDnsbl)
 			{
-				for (int c = 0; c < MAX_CLIENTS; c++)
+				for (int ClientID = 0; ClientID < MAX_CLIENTS; ClientID++)
 				{
-					if (m_aClients[c].m_State == CClient::STATE_EMPTY)
+					if (m_aClients[ClientID].m_State == CClient::STATE_EMPTY)
 						continue;
 
-					if (m_aClients[c].m_DnsblState == CClient::DNSBL_STATE_NONE)
+					if (m_aClients[ClientID].m_DnsblState == CClient::DNSBL_STATE_NONE)
 					{
 						// initiate dnsbl lookup
-						m_aClients[c].m_DnsblState = CClient::DNSBL_STATE_PENDING;
-						InitDnsbl(c);
+						m_aClients[ClientID].m_DnsblState = CClient::DNSBL_STATE_PENDING;
+						InitDnsbl(ClientID);
 					}
-					else if (m_aClients[c].m_DnsblState == CClient::DNSBL_STATE_PENDING &&
-								m_aClients[c].m_DnsblLookup.m_Job.Status() == CJob::STATE_DONE)
+					else if (m_aClients[ClientID].m_DnsblState == CClient::DNSBL_STATE_PENDING &&
+								m_aClients[ClientID].m_DnsblLookup.m_Job.Status() == CJob::STATE_DONE)
 					{
 
-						if (m_aClients[c].m_DnsblLookup.m_Job.Result() != 0)
+						if (m_aClients[ClientID].m_DnsblLookup.m_Job.Result() != 0)
 						{
 							// entry not found -> whitelisted
-							m_aClients[c].m_DnsblState = CClient::DNSBL_STATE_WHITELISTED;
+							m_aClients[ClientID].m_DnsblState = CClient::DNSBL_STATE_WHITELISTED;
 						}
 						else
 						{
 							// entry found -> blacklisted
-							m_aClients[c].m_DnsblState = CClient::DNSBL_STATE_BLACKLISTED;
+							m_aClients[ClientID].m_DnsblState = CClient::DNSBL_STATE_BLACKLISTED;
 
 							// console output
 							char aAddrStr[NETADDR_MAXSTRSIZE];
-							net_addr_str(m_NetServer.ClientAddr(c), aAddrStr, sizeof(aAddrStr), true);
+							net_addr_str(m_NetServer.ClientAddr(ClientID), aAddrStr, sizeof(aAddrStr), true);
 
 							char aBuf[256];
-							str_format(aBuf, sizeof(aBuf), "ClientID=%d addr=%s secure=%s blacklisted", c, aAddrStr, m_NetServer.HasSecurityToken(c)?"yes":"no");
+
+							str_format(aBuf, sizeof(aBuf), "ClientID=%d addr=%s secure=%s blacklisted", ClientID, aAddrStr, m_NetServer.HasSecurityToken(ClientID)?"yes":"no");
+							
 							Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "dnsbl", aBuf);
 						}
 					}
 
-					if (m_aClients[c].m_DnsblState == CClient::DNSBL_STATE_BLACKLISTED &&
+					if (m_aClients[ClientID].m_DnsblState == CClient::DNSBL_STATE_BLACKLISTED &&
 							g_Config.m_SvDnsblBan)
-						m_NetServer.NetBan()->BanAddr(m_NetServer.ClientAddr(c), 60*10, "Blacklisted by DNSBL");
+						m_NetServer.NetBan()->BanAddr(m_NetServer.ClientAddr(ClientID), 60*10, "Blacklisted by DNSBL");
 				}
 			}
 
@@ -1986,6 +2004,8 @@ void CServer::ConStatus(IConsole::IResult *pResult, void *pUser)
 	char aAddrStr[NETADDR_MAXSTRSIZE];
 	CServer *pThis = static_cast<CServer *>(pUser);
 
+	bool CanSeeAddress = pThis->m_aClients[pResult->m_ClientID].m_Authed > CServer::AUTHED_MOD;
+
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
 		if(pThis->m_aClients[i].m_State != CClient::STATE_EMPTY)
@@ -2001,11 +2021,21 @@ void CServer::ConStatus(IConsole::IResult *pResult, void *pUser)
 				if(pThis->m_aClients[i].m_AuthKey >= 0)
 					str_format(aAuthStr, sizeof(aAuthStr), "key=%s %s", pThis->m_AuthManager.KeyIdent(pThis->m_aClients[i].m_AuthKey), pAuthStr);
 
-				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s name='%s' score=%d client=%d secure=%s %s", i, aAddrStr,
-					pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, ((CGameContext *)(pThis->GameServer()))->m_apPlayers[i]->m_ClientVersion, pThis->m_NetServer.HasSecurityToken(i) ? "yes":"no", aAuthStr);
+				if(CanSeeAddress)
+					str_format(aBuf, sizeof(aBuf), "id=%d addr=%s name='%s' score=%d client=%d secure=%s %s", i, aAddrStr,
+						pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, ((CGameContext *)(pThis->GameServer()))->m_apPlayers[i]->m_ClientVersion, pThis->m_NetServer.HasSecurityToken(i) ? "yes":"no", aAuthStr);
+				else
+					str_format(aBuf, sizeof(aBuf), "id=%d name='%s' score=%d client=%d secure=%s %s", i,
+						pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, ((CGameContext *)(pThis->GameServer()))->m_apPlayers[i]->m_ClientVersion, pThis->m_NetServer.HasSecurityToken(i) ? "yes" : "no", aAuthStr);
 			}
 			else
-				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s connecting", i, aAddrStr);
+			{
+				if(CanSeeAddress)
+					str_format(aBuf, sizeof(aBuf), "id=%d addr=%s connecting", i, aAddrStr);
+				else
+					str_format(aBuf, sizeof(aBuf), "id=%d connecting", i);
+			}
+				
 			pThis->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "Server", aBuf);
 		}
 	}
@@ -2017,6 +2047,8 @@ void CServer::ConDnsblStatus(IConsole::IResult *pResult, void *pUser)
 	char aBuf[1024];
 	char aAddrStr[NETADDR_MAXSTRSIZE];
 	CServer *pThis = static_cast<CServer *>(pUser);
+
+	bool CanSeeAddress = pThis->m_aClients[pResult->m_ClientID].m_Authed > CServer::AUTHED_MOD;
 
 	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
@@ -2034,11 +2066,21 @@ void CServer::ConDnsblStatus(IConsole::IResult *pResult, void *pUser)
 				if(pThis->m_aClients[i].m_AuthKey >= 0)
 					str_format(aAuthStr, sizeof(aAuthStr), "key=%s %s", pThis->m_AuthManager.KeyIdent(pThis->m_aClients[i].m_AuthKey), pAuthStr);
 
-				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s name='%s' score=%d client=%d secure=%s %s", i, aAddrStr,
-					pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, ((CGameContext *)(pThis->GameServer()))->m_apPlayers[i]->m_ClientVersion, pThis->m_NetServer.HasSecurityToken(i) ? "yes":"no", aAuthStr);
+				if (CanSeeAddress)
+					str_format(aBuf, sizeof(aBuf), "id=%d addr=%s name='%s' score=%d client=%d secure=%s %s", i, aAddrStr,
+						pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, ((CGameContext *)(pThis->GameServer()))->m_apPlayers[i]->m_ClientVersion, pThis->m_NetServer.HasSecurityToken(i) ? "yes":"no", aAuthStr);
+				else
+					str_format(aBuf, sizeof(aBuf), "id=%d name='%s' score=%d client=%d secure=%s %s", i,
+						pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, ((CGameContext *)(pThis->GameServer()))->m_apPlayers[i]->m_ClientVersion, pThis->m_NetServer.HasSecurityToken(i) ? "yes" : "no", aAuthStr);
 			}
 			else
-				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s connecting", i, aAddrStr);
+			{
+				if (CanSeeAddress)
+					str_format(aBuf, sizeof(aBuf), "id=%d addr=%s connecting", i, aAddrStr);
+				else
+					str_format(aBuf, sizeof(aBuf), "id=%d connecting", i);
+			}
+				
 			pThis->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "Server", aBuf);
 		}
 	}
@@ -2625,8 +2667,11 @@ void CServer::SnapFreeID(int ID)
 
 void *CServer::SnapNewItem(int Type, int ID, int Size)
 {
-	dbg_assert(Type >= 0 && Type <=0xffff, "incorrect type");
-	dbg_assert(ID >= 0 && ID <=0xffff, "incorrect id");
+	if(!(Type >= 0 && Type <= 0xffff))
+	{
+		g_UuidManager.GetUuid(Type);
+	}
+	dbg_assert(ID >= 0 && ID <= 0xffff, "incorrect id");
 	return ID < 0 ? 0 : m_SnapshotBuilder.NewItem(Type, ID, Size);
 }
 
